@@ -1,5 +1,5 @@
 mod models;
-use models::WavFormat::*;
+use models::WavFormat::{self, *};
 
 fn main() {
     let file_path = "file_example.wav";
@@ -7,4 +7,5 @@ fn main() {
     println!("{}", wav.head);
     println!("{}", wav.fmt);
     println!("{}", wav.data);
+    
     }
