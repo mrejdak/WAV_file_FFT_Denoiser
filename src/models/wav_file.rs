@@ -1,137 +1,12 @@
-use std::fmt::{Display};
+use crate::models::audio_samples::AudioSamples;
+use crate::models::errors::WavError;
+use crate::models::fft::{fft_real_zero_padded, ifft};
+use std::fmt::Display;
+use std::fs;
 use std::path::Path;
-use std::{fs};
-use thiserror::Error;
 
 // The Scriptures:
 // http://soundfile.sapp.org/doc/WaveFormat/
-
-#[derive(Error, Debug)]
-pub enum WavError {
-    #[error("Invalid WAV header - expected 'RIFF' but found {0:?}")]
-    InvalidRiffHeader(Vec<u8>),
-    #[error("Invalid WAV format - expected 'WAVE' but found {0:?}")]
-    InvalidWaveFormat(Vec<u8>),
-    #[error("Invalid audio format - Pcm is the only one handled")]
-    InvalidWAudioFormat,
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
-    #[error("Unexpected length of file")]
-    UnexpectedLength,
-}
-
-#[derive(Debug, Clone)]
-pub enum AudioSamples {
-    MonoI8(Vec<i8>),
-    StereoI8(Vec<[i8; 2]>),
-    MonoI16(Vec<i16>),
-    StereoI16(Vec<[i16; 2]>),
-    MonoI32(Vec<i32>),
-    StereoI32(Vec<[i32; 2]>),
-}
-
-impl AudioSamples {
-    fn from_le_bytes(
-        audio_data: &[u8],
-        num_channels: u16,
-        bits_per_sample: u16,
-    ) -> Result<AudioSamples, WavError> {
-        let data_field: AudioSamples = match (num_channels, bits_per_sample) {
-            // 8 bits per sample
-            (1, 8) => {
-                let samples = audio_data.iter().map(|&b| b as i8).collect();
-                AudioSamples::MonoI8(samples)
-            }
-
-            (2, 8) => {
-                let samples = audio_data
-                    .chunks_exact(2)
-                    .map(|c| [i8::from_le_bytes([c[0]]), i8::from_le_bytes([c[1]])])
-                    .collect();
-                AudioSamples::StereoI8(samples)
-            }
-
-            // 16 bits per sample
-            (1, 16) => {
-                let samples = audio_data
-                    .chunks_exact(2)
-                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                    .collect();
-                AudioSamples::MonoI16(samples)
-            }
-
-            (2, 16) => {
-                let samples = audio_data
-                    .chunks_exact(4)
-                    .map(|c| {
-                        [
-                            i16::from_le_bytes([c[0], c[1]]),
-                            i16::from_le_bytes([c[2], c[3]]),
-                        ]
-                    })
-                    .collect();
-                AudioSamples::StereoI16(samples)
-            }
-
-            // 32 bits per sample
-            (1, 32) => {
-                let samples = audio_data
-                    .chunks_exact(4)
-                    .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect();
-                AudioSamples::MonoI32(samples)
-            }
-
-            (2, 32) => {
-                let samples = audio_data
-                    .chunks_exact(8)
-                    .map(|c| {
-                        [
-                            i32::from_le_bytes([c[0], c[1], c[2], c[3]]),
-                            i32::from_le_bytes([c[4], c[5], c[6], c[7]]),
-                        ]
-                    })
-                    .collect();
-                AudioSamples::StereoI32(samples)
-            }
-
-            // Unsupportex sample size
-            _ => return Err(WavError::InvalidWAudioFormat),
-        };
-        Ok(data_field)
-    }
-
-    fn to_le_bytes_vector(&self) -> Vec<u8> {
-        match self {
-            // 8 bit per sample
-            // Casting an i8 to a u8 causes the underlying binary representation (8 bits) to remain unchanged,
-            // but the type system now treats it as unsigned
-
-            // Iterator hell below, enjoy the functional programming paradigm
-            AudioSamples::MonoI8(v) => v.iter().map(|&b| b as u8).collect(),
-
-            AudioSamples::StereoI8(v) => {
-                v.iter().flat_map(|c| c.iter().map(|&b| b as u8)).collect()
-            }
-
-            // 16 bit per sample
-            AudioSamples::MonoI16(v) => v.iter().flat_map(|&b| b.to_le_bytes()).collect(),
-
-            AudioSamples::StereoI16(v) => v
-                .iter()
-                .flat_map(|c| c.iter().flat_map(|&b| b.to_le_bytes()))
-                .collect(),
-
-            // 32 bit per sample
-            AudioSamples::MonoI32(v) => v.iter().flat_map(|&b| b.to_le_bytes()).collect(),
-
-            AudioSamples::StereoI32(v) => v
-                .iter()
-                .flat_map(|c| c.iter().flat_map(|&b| b.to_le_bytes()))
-                .collect(),
-        }
-    }
-}
 
 // Display implementations done using chat
 
@@ -434,5 +309,71 @@ impl WavFile {
     pub fn save_to_file(&self, file_path: &str) -> Result<(), WavError> {
         let v = self.create_le_bytes_vector();
         fs::write(file_path, &v).map_err(WavError::IoError)
+    }
+
+    pub fn denoise_data_fft(&mut self, treshold_percentage: f64) -> Result<(), WavError> {
+        // This modifies in place
+
+        fn denoise_fft(samples: Vec<f64>, treshold_percentage: f64) -> Vec<f64> {
+            // Denoising below applies the low-pass-filter using FFT
+            // It naively zeros all the frequencies, whose amplitude is lesser than threshold
+            // Threshold itself is calculated as treshold_percentage * max_frequency_amplitude
+
+            let original_length = samples.len();
+            let (mut re, mut im) = fft_real_zero_padded(&samples);
+            let n = re.len();
+
+            // The samples are  padded to the nearest power of 2
+            // If we do not wish for silence at the end of new
+            // audiofile it has to be truncated after IFFT
+
+            // Compute the magnitudes of the signal in each frequency
+            let magnitudes: Vec<f64> = re
+                .iter()
+                .zip(im.iter())
+                .map(|(re, im)| (re.powi(2) + im.powi(2)).sqrt())
+                .collect();
+
+            // Find the greatest magnitude - it will be used to apply treshold accordingly
+            let max_magnitude = magnitudes.iter().fold(0.0_f64, |a, &b| a.max(b));
+
+            // Calculate the lower threshold to apply the low-pass-filter
+            // by zeroing frequencies below the threshold
+            let treshold = treshold_percentage * max_magnitude;
+
+            for i in 0..n {
+                if magnitudes[i] < treshold {
+                    re[i] = 0.0;
+                    im[i] = 0.0;
+                }
+            }
+
+            // Truncate IFFT output
+            let (re_denoised, _) = ifft(&re, &im);
+            let output = re_denoised[..original_length].to_vec();
+
+            output
+        }
+
+        match self.data.data {
+            AudioSamples::MonoI8(_) | AudioSamples::MonoI16(_) | AudioSamples::MonoI32(_) => {
+                let main_channel = self.data.data.to_f64_mono()?;
+                let denoised_samples = denoise_fft(main_channel, treshold_percentage);
+                self.data.data =
+                    AudioSamples::from_f64_mono(&denoised_samples, self.fmt.bits_per_sample)?;
+                Ok(())
+            }
+            AudioSamples::StereoI8(_) | AudioSamples::StereoI16(_) | AudioSamples::StereoI32(_) => {
+                let (left_channel, right_channel) = self.data.data.to_f64_stereo()?;
+                let denoised_left = denoise_fft(left_channel, treshold_percentage);
+                let denoised_right = denoise_fft(right_channel, treshold_percentage);
+                self.data.data = AudioSamples::from_f64_stereo(
+                    &denoised_left,
+                    &denoised_right,
+                    self.fmt.bits_per_sample,
+                )?;
+                Ok(())
+            }
+        }
     }
 }

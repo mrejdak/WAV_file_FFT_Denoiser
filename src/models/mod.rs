@@ -1,1 +1,4 @@
-pub mod WavFormat;
+pub mod wav_file;
+pub mod audio_samples;
+pub mod errors;
+pub mod fft;
