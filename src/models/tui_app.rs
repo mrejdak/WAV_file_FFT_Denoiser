@@ -18,7 +18,7 @@ pub(crate) enum Event {
     Input(crossterm::event::KeyEvent),
     // FileSelected(WavFile),
     SoundProgress(f64),
-    SinksReady(rodio::Sink, rodio::Sink, Instant),
+    SinksReady(rodio::Sink, rodio::Sink, Instant, Duration),
 }
 
 pub struct App {
@@ -29,17 +29,18 @@ pub struct App {
     sink_original: Option<rodio::Sink>,
     sink_denoised: Option<rodio::Sink>,
     start_time: Option<Instant>,
+    duration: Option<Duration>,
 }
 
-pub(crate) fn run_background_thread(tx: mpsc::Sender<Event>) {
-    let mut progress = 0.0;
-    loop {
-        thread::sleep(Duration::from_secs(1));
-
-        // set progress to current time / total_duration
-        tx.send(Event::SoundProgress(progress)).unwrap();
-    }
-}
+// pub(crate) fn run_background_thread(tx: mpsc::Sender<Event>) {
+//     let mut progress = 0.0;
+//     loop {
+//         thread::sleep(Duration::from_secs(1));
+//
+//         // set progress to current time / total_duration
+//         tx.send(Event::SoundProgress(progress)).unwrap();
+//     }
+// }
 
 fn play_file( playback_tx: Sender<Event>) -> io::Result<()> {
     let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
@@ -51,6 +52,7 @@ fn play_file( playback_tx: Sender<Event>) -> io::Result<()> {
 
 
     let mut denoised_wav = wav.clone();
+    playback_tx.send(Event::SoundProgress(0.0)).unwrap();
     denoised_wav.denoise_data_fft(0.1).expect("denoise panic");
     denoised_wav.save_to_file("C:\\Users\\Work\\Desktop\\Rust\\rust-project\\src\\new_file.wav").expect("save panic");
     let source = WavSource::from_wav_file(&wav);
@@ -64,10 +66,21 @@ fn play_file( playback_tx: Sender<Event>) -> io::Result<()> {
     sink1.set_volume(1.0);
     sink2.set_volume(0.0);
 
-    playback_tx.send(Event::SinksReady(sink1, sink2, Instant::now())).unwrap();
+    playback_tx.send(Event::SinksReady(sink1, sink2, Instant::now(), total_duration)).unwrap();
 
-    thread::sleep(Duration::from_millis(10000));
-    // TODO: after implementing responsive TUI, handle both tracks playing at the same time, with alternating volumes using 2 sinks
+    thread::sleep(Duration::from_secs(total_duration.as_secs()));
+
+    Ok(())
+}
+
+fn load_progress_bar(progress_tx: Sender<Event>, start_time: Instant, total_duration: Duration) -> io::Result<()> {
+    let mut progress = 0.0;
+    while progress < 1.0 {
+        let elapsed = start_time.elapsed().as_secs_f64();
+        progress = (elapsed / total_duration.as_secs_f64()).min(1.0);
+        progress_tx.send(Event::SoundProgress(progress)).unwrap();
+        thread::sleep(Duration::from_millis(100));
+    }
     Ok(())
 }
 
@@ -89,6 +102,7 @@ impl App {
             sink_original: None,
             sink_denoised: None,
             start_time: None,
+            duration: None,
         }
     }
 
@@ -98,18 +112,28 @@ impl App {
             match rx.recv().unwrap() {
                 Event::Input(key_event) => self.handle_key_event(key_event)?,
                 Event::SoundProgress(progress) => self.sound_progress = progress,
-                Event::SinksReady(sink_orig, sink_denoised, start_time) => {
+                Event::SinksReady(sink_orig, sink_denoised, start_time, duration) => {
                     self.sink_original = Some(sink_orig);
                     self.sink_denoised = Some(sink_denoised);
                     self.start_time = Some(start_time);
+                    self.duration = Some(duration);
+                    self.handle_sound(start_time, duration);
                 }
             }
         }
         Ok(())
     }
 
+
     fn draw(&self, frame: &mut Frame) {
         frame.render_widget(self, frame.area())
+    }
+
+    fn handle_sound(&mut self, start_time: Instant, duration: Duration) {
+        let progress_tx = self.tx.clone();
+        thread::spawn(move || {
+            load_progress_bar(progress_tx, start_time, duration).expect("tu tez sie nie wywal");
+        });
     }
 
     fn handle_key_event(&mut self, key_event: crossterm::event::KeyEvent) -> io::Result<()> {
@@ -126,9 +150,11 @@ impl App {
                 if orig.volume() > 0.0 {
                     orig.set_volume(0.0);
                     denoised.set_volume(1.0);
+                    self.progress_bar_color = ratatui::style::Color::Red;
                 } else {
                     orig.set_volume(1.0);
                     denoised.set_volume(0.0);
+                    self.progress_bar_color = ratatui::style::Color::Green;
                 }
             }
         }
