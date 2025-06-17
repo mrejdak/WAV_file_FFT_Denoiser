@@ -19,6 +19,7 @@ pub(crate) enum Event {
     // FileSelected(WavFile),
     SoundProgress(f64),
     SinksReady(rodio::Sink, rodio::Sink, Instant, Duration),
+    ProgressLabel(String),
 }
 
 pub struct App {
@@ -30,6 +31,7 @@ pub struct App {
     sink_denoised: Option<rodio::Sink>,
     start_time: Option<Instant>,
     duration: Option<Duration>,
+    label: String,
 }
 
 // pub(crate) fn run_background_thread(tx: mpsc::Sender<Event>) {
@@ -73,12 +75,23 @@ fn play_file( playback_tx: Sender<Event>) -> io::Result<()> {
     Ok(())
 }
 
+fn format_time(current: u64, total: u64) -> String {
+    let format = |t: u64| {
+        let minutes = t / 60;
+        let seconds = t % 60;
+        format!("{:02}:{:02}", minutes, seconds)
+    };
+    format!("{}/{}", format(current), format(total))
+}
+
 fn load_progress_bar(progress_tx: Sender<Event>, start_time: Instant, total_duration: Duration) -> io::Result<()> {
     let mut progress = 0.0;
     while progress < 1.0 {
-        let elapsed = start_time.elapsed().as_secs_f64();
-        progress = (elapsed / total_duration.as_secs_f64()).min(1.0);
+        progress = (start_time.elapsed().as_secs_f64() / total_duration.as_secs_f64()).min(1.0);
         progress_tx.send(Event::SoundProgress(progress)).unwrap();
+        progress_tx.send(Event::ProgressLabel(
+            format_time(start_time.elapsed().as_secs(), total_duration.as_secs()))
+        ).unwrap();
         thread::sleep(Duration::from_millis(100));
     }
     Ok(())
@@ -103,6 +116,7 @@ impl App {
             sink_denoised: None,
             start_time: None,
             duration: None,
+            label: String::from("Press <P> to play the sound"),
         }
     }
 
@@ -118,7 +132,8 @@ impl App {
                     self.start_time = Some(start_time);
                     self.duration = Some(duration);
                     self.handle_sound(start_time, duration);
-                }
+                },
+                Event::ProgressLabel(label) => self.label = label,
             }
         }
         Ok(())
@@ -140,10 +155,13 @@ impl App {
         if key_event.is_press() && key_event.code == crossterm::event::KeyCode::Char('q') {
             self.exit = true;
         } else if key_event.is_press() && key_event.code == crossterm::event::KeyCode::Char('p') {
-            let playback_tx = self.tx.clone();  // need to play file in a thread
-            thread::spawn(move || {
-                play_file(playback_tx).expect("pls nie wywal sie");
-            });
+            if self.label == String::from("Press <P> to play the sound") {
+                self.label = String::from("Denoising...");
+                let playback_tx = self.tx.clone();  // need to play file in a thread
+                thread::spawn(move || {
+                    play_file(playback_tx).expect("pls nie wywal sie");
+                });
+            }
             // self.play_file(playback_tx)?;
         } else if key_event.is_press() && key_event.code == crossterm::event::KeyCode::Char('c') {
             if let (Some(orig), Some(denoised)) = (&self.sink_original, &self.sink_denoised) {
@@ -183,7 +201,7 @@ impl Widget for &App {
         let block = Block::bordered().title(" Raw Sound Wave ").borders(Borders::ALL);
 
         let progress_bar = Gauge::default().gauge_style(Style::default().fg(self.progress_bar_color))
-            .block(sound_controls_block).label("TODO: progress in min:sec").ratio(self.sound_progress);
+            .block(sound_controls_block).label(&self.label).ratio(self.sound_progress);
 
         let sound_wave = Gauge::default().block(block); // temporary sound_wave object
         // let sound_wave = Canvas::default().block(block);
