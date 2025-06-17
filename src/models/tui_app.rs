@@ -18,6 +18,7 @@ pub(crate) enum Event {
     Input(crossterm::event::KeyEvent),
     // FileSelected(WavFile),
     SoundProgress(f64),
+    SinksReady(rodio::Sink, rodio::Sink, Instant),
 }
 
 pub struct App {
@@ -38,6 +39,36 @@ pub(crate) fn run_background_thread(tx: mpsc::Sender<Event>) {
         // set progress to current time / total_duration
         tx.send(Event::SoundProgress(progress)).unwrap();
     }
+}
+
+fn play_file( playback_tx: Sender<Event>) -> io::Result<()> {
+    let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
+    let sink1 = rodio::Sink::try_new(&stream_handle).unwrap();
+    let sink2 = rodio::Sink::try_new(&stream_handle).unwrap();
+
+    let file_path = "C:\\Users\\Work\\Desktop\\Rust\\rust-project\\src\\noise_example.wav";
+    let mut wav = WavFile::from_wav_file(file_path).unwrap();
+
+
+    let mut denoised_wav = wav.clone();
+    denoised_wav.denoise_data_fft(0.1).expect("denoise panic");
+    denoised_wav.save_to_file("C:\\Users\\Work\\Desktop\\Rust\\rust-project\\src\\new_file.wav").expect("save panic");
+    let source = WavSource::from_wav_file(&wav);
+    let denoised_source = WavSource::from_wav_file(&denoised_wav);
+
+    let total_duration = source.total_duration().unwrap();
+
+    sink1.append(source);
+    sink2.append(denoised_source);
+
+    sink1.set_volume(1.0);
+    sink2.set_volume(0.0);
+
+    playback_tx.send(Event::SinksReady(sink1, sink2, Instant::now())).unwrap();
+
+    thread::sleep(Duration::from_millis(10000));
+    // TODO: after implementing responsive TUI, handle both tracks playing at the same time, with alternating volumes using 2 sinks
+    Ok(())
 }
 
 pub(crate) fn handle_input_events(tx: mpsc::Sender<Event>) {
@@ -67,6 +98,11 @@ impl App {
             match rx.recv().unwrap() {
                 Event::Input(key_event) => self.handle_key_event(key_event)?,
                 Event::SoundProgress(progress) => self.sound_progress = progress,
+                Event::SinksReady(sink_orig, sink_denoised, start_time) => {
+                    self.sink_original = Some(sink_orig);
+                    self.sink_denoised = Some(sink_denoised);
+                    self.start_time = Some(start_time);
+                }
             }
         }
         Ok(())
@@ -80,8 +116,11 @@ impl App {
         if key_event.is_press() && key_event.code == crossterm::event::KeyCode::Char('q') {
             self.exit = true;
         } else if key_event.is_press() && key_event.code == crossterm::event::KeyCode::Char('p') {
-            let playback_tx = self.tx.clone();
-            self.play_file(playback_tx)?;
+            let playback_tx = self.tx.clone();  // need to play file in a thread
+            thread::spawn(move || {
+                play_file(playback_tx).expect("pls nie wywal sie");
+            });
+            // self.play_file(playback_tx)?;
         } else if key_event.is_press() && key_event.code == crossterm::event::KeyCode::Char('c') {
             if let (Some(orig), Some(denoised)) = (&self.sink_original, &self.sink_denoised) {
                 if orig.volume() > 0.0 {
@@ -96,38 +135,6 @@ impl App {
         Ok(())
     }
 
-    fn play_file(&mut self, playback_tx: Sender<Event>) -> io::Result<()> {
-        let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
-        let sink1 = rodio::Sink::try_new(&stream_handle).unwrap();
-        let sink2 = rodio::Sink::try_new(&stream_handle).unwrap();
-
-        let file_path = "C:\\Users\\Work\\Desktop\\Rust\\rust-project\\src\\noise_example.wav";
-        let mut wav = WavFile::from_wav_file(file_path).unwrap();
-
-
-        let mut denoised_wav = wav.clone();
-        denoised_wav.denoise_data_fft(0.001).expect("denoise panic");
-        denoised_wav.save_to_file("C:\\Users\\Work\\Desktop\\Rust\\rust-project\\src\\new_file.wav").expect("save panic");
-        thread::sleep(Duration::from_millis(3000));
-        let source = WavSource::from_wav_file(&wav);
-        let denoised_source = WavSource::from_wav_file(&denoised_wav);
-
-        let total_duration = source.total_duration().unwrap();
-
-        sink1.append(source);
-        sink2.append(denoised_source);
-
-        sink1.set_volume(1.0);
-        sink2.set_volume(0.0);
-
-        self.sink_original = Some(sink1);
-        self.sink_denoised = Some(sink2);
-        self.start_time = Some(Instant::now());
-
-        thread::sleep(Duration::from_millis(10000));
-        // TODO: after implementing responsive TUI, handle both tracks playing at the same time, with alternating volumes using 2 sinks
-        Ok(())
-    }
 }
 
 impl Widget for &App {
