@@ -165,7 +165,7 @@ pub fn new_data(subchunk_size: u32, data: AudioSamples) -> WavData {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WavFile {
     pub head: WavHead,
     pub fmt: WavFmt,

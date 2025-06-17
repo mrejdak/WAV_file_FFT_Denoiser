@@ -7,6 +7,7 @@ pub struct WavSource {
     samples: std::vec::IntoIter<i16>,
     sample_rate: u32,
     channels: u16,
+    samples_per_channel: u32,
 }
 
 impl Iterator for WavSource {
@@ -31,16 +32,17 @@ impl Source for WavSource {
     }
 
     fn total_duration(&self) -> Option<Duration> {
-        None
+        Some(Duration::from_secs(self.samples_per_channel as u64 / self.sample_rate as u64))
     }
 }
 
 impl WavSource {
-    pub fn from_wav_file(wav: WavFile) -> Self {
+    pub fn from_wav_file(wav: &WavFile) -> Self {
         Self {
-            samples: Self::from_audio_samples(wav.data.data).into_iter(),
+            samples: Self::from_audio_samples(wav.data.data.clone()).into_iter(),
             sample_rate: wav.fmt.sample_rate,
             channels: wav.fmt.num_channels,
+            samples_per_channel: wav.data.subchunk_size / wav.fmt.block_align as u32,
         }
     }
 
