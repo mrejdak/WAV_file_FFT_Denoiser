@@ -27,7 +27,6 @@ pub struct App {
     path: Option<PathBuf>,
     selected: usize,
     exit: bool,
-    allow_actions: bool,
     progress_bar_color: Color,
     sound_progress: f64,
     tx: Sender<Event>,
@@ -40,47 +39,57 @@ pub struct App {
 }
 
 fn play_file(playback_tx: Sender<Event>, path: PathBuf, filename: &String) -> io::Result<()> {
-    let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
-    let sink1 = rodio::Sink::try_new(&stream_handle).unwrap();
-    let sink2 = rodio::Sink::try_new(&stream_handle).unwrap();
+    let (_stream, stream_handle) =
+        rodio::OutputStream::try_default().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let sink1 =
+        rodio::Sink::try_new(&stream_handle).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let sink2 =
+        rodio::Sink::try_new(&stream_handle).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-    let full_path = path.clone().join(filename.clone());
-    let file_path = full_path.to_str().unwrap();
+    let full_path = path.join(filename);
+    let file_path = full_path
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid file path"))?;
 
-    let save_path_buf = path.join("denoised").join(filename);
-    let save_path = save_path_buf.to_str().unwrap();
+    let save_path = path
+        .join("denoised")
+        .join(filename)
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid save path"))?
+        .to_string();
 
-    let wav = WavFile::from_wav_file(file_path).unwrap();
+    let wav = WavFile::from_wav_file(file_path)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Error loading WAV: {:?}", e)))?;
 
     let mut denoised_wav = wav.clone();
-    denoised_wav.denoise_data_fft(0.01).expect("denoise panic");
     denoised_wav
-        .save_to_file(save_path)
-        .expect("save panic");
+        .denoise_data_fft(0.01)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Denoise failed: {:?}", e)))?;
+    denoised_wav
+        .save_to_file(&save_path)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Save failed: {:?}", e)))?;
+
     let source = WavSource::from_wav_file(&wav);
     let denoised_source = WavSource::from_wav_file(&denoised_wav);
 
-    let total_duration = source.total_duration().unwrap();
+    let total_duration = source
+        .total_duration()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Failed to get total duration"))?;
 
     sink1.append(source);
     sink2.append(denoised_source);
-
     sink1.set_volume(1.0);
     sink2.set_volume(0.0);
 
     playback_tx
-        .send(Event::SinksReady(
-            sink1,
-            sink2,
-            Instant::now(),
-            total_duration,
-        ))
-        .unwrap();
+        .send(Event::SinksReady(sink1, sink2, Instant::now(), total_duration))
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     thread::sleep(Duration::from_secs(total_duration.as_secs()));
 
     Ok(())
 }
+
 
 fn format_time(current: u64, total: u64) -> String {
     let format = |t: u64| {
@@ -99,13 +108,15 @@ fn load_progress_bar(
     let mut progress = 0.0;
     while progress < 1.0 {
         progress = (start_time.elapsed().as_secs_f64() / total_duration.as_secs_f64()).min(1.0);
-        progress_tx.send(Event::SoundProgress(progress)).unwrap();
+        progress_tx
+            .send(Event::SoundProgress(progress))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         progress_tx
             .send(Event::ProgressLabel(
                 format_time(start_time.elapsed().as_secs(), total_duration.as_secs()),
                 false,
             ))
-            .unwrap();
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         thread::sleep(Duration::from_millis(100));
     }
     progress_tx
@@ -113,15 +124,24 @@ fn load_progress_bar(
             "Press <P> to play the sound".to_string(),
             true,
         ))
-        .unwrap();
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
     Ok(())
 }
 
+
 pub(crate) fn handle_input_events(tx: mpsc::Sender<Event>) {
     loop {
-        match crossterm::event::read().unwrap() {
-            crossterm::event::Event::Key(key_event) => tx.send(Event::Input(key_event)).unwrap(),
-            _ => {}
+        match crossterm::event::read() {
+            Ok(crossterm::event::Event::Key(key_event)) => {
+                if let Err(e) = tx.send(Event::Input(key_event)) {
+                    eprintln!("Error sending key event: {:?}", e);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Error reading input event: {:?}", e);
+            }
         }
     }
 }
@@ -133,7 +153,6 @@ impl App {
             path: None,
             selected: 0,
             exit: false,
-            allow_actions: false,
             progress_bar_color: Color::Green,
             sound_progress: 0.0,
             tx,
@@ -141,7 +160,7 @@ impl App {
             sink_denoised: None,
             start_time: None,
             duration: None,
-            ready_to_play: true,
+            ready_to_play: false,
             label: String::from("Press <P> to play the sound"),
         }
     }
@@ -151,27 +170,33 @@ impl App {
         terminal: &mut DefaultTerminal,
         rx: mpsc::Receiver<Event>,
     ) -> io::Result<()> {
-        self.list_wav_files().expect("Couldn't load files panic");
+        self.list_wav_files()?;
+
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
-            match rx.recv().unwrap() {
-                Event::Input(key_event) => self.handle_key_event(key_event)?,
-                Event::SoundProgress(progress) => self.sound_progress = progress,
-                Event::SinksReady(sink_orig, sink_denoised, start_time, duration) => {
+            match rx.recv() {
+                Ok(Event::Input(key_event)) => self.handle_key_event(key_event)?,
+                Ok(Event::SoundProgress(progress)) => self.sound_progress = progress,
+                Ok(Event::SinksReady(sink_orig, sink_denoised, start_time, duration)) => {
                     self.sink_original = Some(sink_orig);
                     self.sink_denoised = Some(sink_denoised);
                     self.start_time = Some(start_time);
                     self.duration = Some(duration);
                     self.display_progress(start_time, duration);
                 }
-                Event::ProgressLabel(label, ready_to_play) => {
+                Ok(Event::ProgressLabel(label, ready_to_play)) => {
                     self.label = label;
                     self.ready_to_play = ready_to_play;
+                }
+                Err(e) => {
+                    eprintln!("Event receive error: {:?}", e);
+                    break;
                 }
             }
         }
         Ok(())
     }
+
 
     fn list_wav_files(&mut self) -> io::Result<()> {
         let dir = env::current_dir()?.join("data");
@@ -182,7 +207,7 @@ impl App {
                 .filter_map(|entry| {
                     let path = entry.ok()?.path();
                     if path.extension()?.to_str()? == "wav" {
-                        self.allow_actions = true;
+                        self.ready_to_play = true;
                         Some(path.file_name()?.to_string_lossy().to_string())
                     } else {
                         None
@@ -190,7 +215,7 @@ impl App {
                 })
                 .collect(),
         );
-        if !self.allow_actions {
+        if !self.ready_to_play {
             self.files = Some(vec!["<<Couldn't load files>>".to_string()]);
         }
         Ok(())
@@ -203,7 +228,9 @@ impl App {
     fn display_progress(&mut self, start_time: Instant, duration: Duration) {
         let progress_tx = self.tx.clone();
         thread::spawn(move || {
-            load_progress_bar(progress_tx, start_time, duration).expect("progress display panic");
+            if let Err(e) = load_progress_bar(progress_tx, start_time, duration) {
+                eprintln!("Progress bar error: {:?}", e);
+            }
         });
     }
 
@@ -226,7 +253,7 @@ impl App {
     }
 
     fn handle_key_event(&mut self, key_event: crossterm::event::KeyEvent) -> io::Result<()> {
-        if key_event.is_press() && self.allow_actions {
+        if key_event.is_press() {
             match key_event.code {
                 crossterm::event::KeyCode::Char('q') => self.exit = true,
                 crossterm::event::KeyCode::Char('p') => {
@@ -241,7 +268,9 @@ impl App {
                         let file_path = self.path.clone().unwrap();
                         let filename = self.selected_file().unwrap().clone();
                         thread::spawn(move || {
-                            play_file(playback_tx, file_path, &filename).expect("playback panic");
+                            if let Err(e) = play_file(playback_tx, file_path, &filename) {
+                                eprintln!("Playback thread error: {:?}", e);
+                            }
                         });
                     }
                 }
@@ -274,15 +303,15 @@ impl App {
 
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let vertical_layout = Layout::vertical([
-            Constraint::Percentage(60),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-        ]);
+        // let vertical_layout = Layout::vertical([
+        //     Constraint::Percentage(60),
+        //     Constraint::Percentage(20),
+        //     Constraint::Percentage(20),
+        // ]);
         let horizontal_layout =
             Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]);
-        let [top_area, raw_wave_area, denoised_wave_area] = vertical_layout.areas(area);
-        let [file_selection_area, progress_bar_area] = horizontal_layout.areas(top_area);
+        // let [top_area, raw_wave_area, denoised_wave_area] = vertical_layout.areas(area);
+        let [file_selection_area, progress_bar_area] = horizontal_layout.areas(area);
 
         let controls = Line::from(vec![
             " Change File ".into(),
@@ -330,9 +359,6 @@ impl Widget for &App {
             .borders(Borders::ALL)
             .border_set(border::THICK);
 
-        let block = Block::bordered()
-            .title(" Raw Sound Wave ")
-            .borders(Borders::ALL);
 
         let progress_bar = Gauge::default()
             .gauge_style(Style::default().fg(self.progress_bar_color))
@@ -340,8 +366,15 @@ impl Widget for &App {
             .label(&self.label)
             .ratio(self.sound_progress);
 
-        let sound_wave = Gauge::default().block(block); // temporary sound_wave object
+
+        // let block = Block::bordered()
+        //     .title(" Raw Sound Wave ")
+        //     .borders(Borders::ALL);
+
+        // let sound_wave = Gauge::default().block(block); // temporary sound_wave object
         // let sound_wave = Canvas::default().block(block);
+        // sound_wave.render(raw_wave_area, buf);
+
 
         StatefulWidget::render(&file_selector, file_selection_area, buf, &mut state);
 
@@ -354,8 +387,6 @@ impl Widget for &App {
             },
             buf,
         );
-
-        sound_wave.render(raw_wave_area, buf);
 
     }
 }
