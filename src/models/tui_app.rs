@@ -19,7 +19,7 @@ pub(crate) enum Event {
     // FileSelected(WavFile),
     SoundProgress(f64),
     SinksReady(rodio::Sink, rodio::Sink, Instant, Duration),
-    ProgressLabel(String),
+    ProgressLabel(String, bool),
 }
 
 pub struct App {
@@ -31,6 +31,7 @@ pub struct App {
     sink_denoised: Option<rodio::Sink>,
     start_time: Option<Instant>,
     duration: Option<Duration>,
+    ready_to_play: bool,
     label: String,
 }
 
@@ -54,7 +55,6 @@ fn play_file( playback_tx: Sender<Event>) -> io::Result<()> {
 
 
     let mut denoised_wav = wav.clone();
-    playback_tx.send(Event::SoundProgress(0.0)).unwrap();
     denoised_wav.denoise_data_fft(0.1).expect("denoise panic");
     denoised_wav.save_to_file("C:\\Users\\Work\\Desktop\\Rust\\rust-project\\src\\new_file.wav").expect("save panic");
     let source = WavSource::from_wav_file(&wav);
@@ -90,10 +90,11 @@ fn load_progress_bar(progress_tx: Sender<Event>, start_time: Instant, total_dura
         progress = (start_time.elapsed().as_secs_f64() / total_duration.as_secs_f64()).min(1.0);
         progress_tx.send(Event::SoundProgress(progress)).unwrap();
         progress_tx.send(Event::ProgressLabel(
-            format_time(start_time.elapsed().as_secs(), total_duration.as_secs()))
+            format_time(start_time.elapsed().as_secs(), total_duration.as_secs()), false)
         ).unwrap();
         thread::sleep(Duration::from_millis(100));
     }
+    progress_tx.send(Event::ProgressLabel("Press <P> to play the sound".to_string(), true)).unwrap();
     Ok(())
 }
 
@@ -116,6 +117,7 @@ impl App {
             sink_denoised: None,
             start_time: None,
             duration: None,
+            ready_to_play: true,
             label: String::from("Press <P> to play the sound"),
         }
     }
@@ -133,7 +135,10 @@ impl App {
                     self.duration = Some(duration);
                     self.handle_sound(start_time, duration);
                 },
-                Event::ProgressLabel(label) => self.label = label,
+                Event::ProgressLabel(label, ready_to_play) => {
+                    self.label = label;
+                    self.ready_to_play = ready_to_play;
+                },
             }
         }
         Ok(())
@@ -155,7 +160,12 @@ impl App {
         if key_event.is_press() && key_event.code == crossterm::event::KeyCode::Char('q') {
             self.exit = true;
         } else if key_event.is_press() && key_event.code == crossterm::event::KeyCode::Char('p') {
-            if self.label == String::from("Press <P> to play the sound") {
+            if self.ready_to_play {
+                self.ready_to_play = false;
+                self.sound_progress = 0.0;
+                self.progress_bar_color = ratatui::style::Color::Green;
+                self.sink_original = None;
+                self.sink_denoised = None;
                 self.label = String::from("Denoising...");
                 let playback_tx = self.tx.clone();  // need to play file in a thread
                 thread::spawn(move || {
