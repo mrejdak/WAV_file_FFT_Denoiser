@@ -19,7 +19,7 @@ The codebase includes modules for WAV file parsing, FFT-based denoising, and aud
 
 <br/>
 <p align="center">
-  <img src="/>
+  <img src="https://github.com/user-attachments/assets/237bb34a-d83c-4093-8a65-4579a6760eca" width="70%"/>
   <p align="center"><i>Terminal GUI of the application</i></p>
 </p>
 <br/>
