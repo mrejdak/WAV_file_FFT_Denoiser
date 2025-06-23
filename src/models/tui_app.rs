@@ -344,7 +344,7 @@ impl App {
                     self.threshold = (self.threshold - 0.01).max(0.0);
                 }
                 crossterm::event::KeyCode::Right => {
-                    self.threshold = (self.threshold + 0.01).min(0.5);
+                    self.threshold = (self.threshold + 0.01).min(0.1);
                 }
                 _ => {}
             }
@@ -427,7 +427,7 @@ impl Widget for &App {
             .gauge_style(Style::default().fg(Color::LightBlue))
             .block(threshold_control_block)
             .label(Span::raw(format!("Threshold: {:.2}", self.threshold)))
-            .ratio(self.threshold * 2.0);
+            .ratio(self.threshold * 10.0);
 
         StatefulWidget::render(&file_selector, file_selection_area, buf, &mut state);
 
