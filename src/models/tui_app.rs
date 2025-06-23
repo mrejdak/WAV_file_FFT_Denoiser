@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
+use ratatui::text::Span;
 
 pub(crate) enum Event {
     Input(crossterm::event::KeyEvent),
@@ -29,6 +30,7 @@ pub struct App {
     exit: bool,
     progress_bar_color: Color,
     sound_progress: f64,
+    threshold: f64,
     tx: Sender<Event>,
     sink_original: Option<rodio::Sink>,
     sink_denoised: Option<rodio::Sink>,
@@ -38,7 +40,7 @@ pub struct App {
     label: String,
 }
 
-fn play_file(playback_tx: Sender<Event>, path: PathBuf, filename: &String) -> io::Result<()> {
+fn play_file(playback_tx: Sender<Event>, path: PathBuf, filename: &String, threshold: f64) -> io::Result<()> {
     let (_stream, stream_handle) =
         rodio::OutputStream::try_default().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let sink1 =
@@ -63,7 +65,7 @@ fn play_file(playback_tx: Sender<Event>, path: PathBuf, filename: &String) -> io
 
     let mut denoised_wav = wav.clone();
     denoised_wav
-        .denoise_data_fft(0.01)
+        .denoise_data_fft(threshold)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Denoise failed: {:?}", e)))?;
     denoised_wav
         .save_to_file(&save_path)
@@ -155,6 +157,7 @@ impl App {
             exit: false,
             progress_bar_color: Color::Green,
             sound_progress: 0.0,
+            threshold: 0.01,
             tx,
             sink_original: None,
             sink_denoised: None,
@@ -292,8 +295,9 @@ impl App {
                         let playback_tx = self.tx.clone(); // need to play file in a thread
                         let file_path = self.path.clone().unwrap();
                         let filename = self.selected_file().unwrap().clone();
+                        let threshold = self.threshold.clone();
                         thread::spawn(move || {
-                            if let Err(e) = play_file(playback_tx, file_path, &filename) {
+                            if let Err(e) = play_file(playback_tx, file_path, &filename, threshold) {
                                 eprintln!("Playback thread error: {:?}", e);
                             }
                         });
@@ -319,6 +323,12 @@ impl App {
                 crossterm::event::KeyCode::Up => {
                     self.previous()
                 }
+                crossterm::event::KeyCode::Left => {
+                    self.threshold = (self.threshold - 0.01).max(0.0);
+                }
+                crossterm::event::KeyCode::Right => {
+                    self.threshold = (self.threshold + 0.01).min(0.5);
+                }
                 _ => {}
             }
         }
@@ -336,8 +346,9 @@ impl Widget for &App {
         let horizontal_layout =
             Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]);
         // let [top_area, raw_wave_area, denoised_wave_area] = vertical_layout.areas(area);
-        let [file_selection_area, progress_bar_area] = horizontal_layout.areas(area);
-
+        let [file_selection_area, right_side_area] = horizontal_layout.areas(area);
+        let vertical_layout = Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]);
+        let [progress_bar_area, threshold_area] = vertical_layout.areas(right_side_area);
         let controls = Line::from(vec![
             " Change File ".into(),
             "<Up/Down>".red().bold(),
@@ -391,8 +402,24 @@ impl Widget for &App {
             .label(&self.label)
             .ratio(self.sound_progress);
 
+        let threshold_instructions = Line::from(vec![
+            " +0.01 / -0.01 ".into(),
+            " <Left>/<Right> ".blue().bold(),
+        ])
+            .centered();
 
-        // let block = Block::bordered()
+        let threshold_control_block = Block::bordered()
+            .title(" Threshold ")
+            .title_bottom(threshold_instructions)
+            .borders(Borders::ALL)
+            .border_set(border::THICK);
+
+        let threshold_bar = Gauge::default()
+            .gauge_style(Style::default().fg(Color::LightBlue))
+            .block(threshold_control_block)
+            .label(Span::raw(format!("Threshold: {:.2}", self.threshold)))
+            .ratio(self.threshold * 2.0);
+        // let block = Block::bordered()t
         //     .title(" Raw Sound Wave ")
         //     .borders(Borders::ALL);
 
@@ -412,6 +439,7 @@ impl Widget for &App {
             },
             buf,
         );
+        threshold_bar.render(threshold_area, buf)
 
     }
 }
