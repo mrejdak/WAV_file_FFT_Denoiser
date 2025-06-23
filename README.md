@@ -15,12 +15,12 @@ The codebase includes modules for WAV file parsing, FFT-based denoising, and aud
 | FFT Utilities  | Perform FFT and IFFT on audio samples       | [src/fft.rs](src/fft.rs)                |
 | Denoising      | Remove noise using frequency thresholding   | [src/models/wav_file.rs](src/models/wav_file.rs) |
 | AudioSamples   | Audio data abstraction and conversion       | [src/models/audio_samples.rs](src/models/audio_samples.rs) |
-| TUI            | Terminal GUI of the application             | [src/models/tui_app.rs](src/models/tui_app.rs) |
+| TUI            | Terminal UI of the application              | [src/models/tui_app.rs](src/models/tui_app.rs) |
 
 <br/>
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/237bb34a-d83c-4093-8a65-4579a6760eca" width="70%"/>
-  <p align="center"><i>Terminal GUI of the application</i></p>
+  <img src="https://github.com/user-attachments/assets/95827f3f-3f20-4e2c-ba86-7b4c9574833b" width="70%"/>
+  <p align="center"><i>Terminal UI of the application</i></p>
 </p>
 <br/>
 
@@ -31,10 +31,12 @@ The codebase includes modules for WAV file parsing, FFT-based denoising, and aud
 
 ## Setup Instructions
 
+You can either download the latest release binary (built for Windows), or build from source by following the steps below:
+
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/yourusername/rust-wav-audio-processor.git
-cd rust-wav-audio-processor
+git clone https://github.com/mrejdak/WAV_file_FFT_Denoiser
+cd WAV_file_FFT_Denoiser
 ```
 
 ### 2. Build the project
