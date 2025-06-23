@@ -1,6 +1,10 @@
 # Rust WAV Audio FFT Denoiser 🎵
 ## Computer Science | AGH 2025
 
+Developed by:
+- Michał Rejdak [[mrejdak]](https://github.com/mrejdak)
+- Paweł Fornagiel [[pFornagiel]](https://github.com/pFornagiel)
+
 ## Project Description
 
 This repository contains a Rust-based implementation for reading, processing, and denoising WAV audio files using Fast Fourier Transform (FFT) techniques. The project is designed as part of *Rust Programming* coursework, being a comprehensive introduction to Rust language.
