@@ -2,9 +2,10 @@ use crate::models::wav_file::WavFile;
 use crate::models::wav_source::WavSource;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::prelude::{Line, Stylize, Widget, StatefulWidget};
+use ratatui::prelude::{Line, StatefulWidget, Stylize, Widget};
 use ratatui::style::{Color, Style};
 use ratatui::symbols::border;
+use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState};
 use ratatui::{DefaultTerminal, Frame};
 use rodio::Source;
@@ -29,6 +30,7 @@ pub struct App {
     exit: bool,
     progress_bar_color: Color,
     sound_progress: f64,
+    threshold: f64,
     tx: Sender<Event>,
     sink_original: Option<rodio::Sink>,
     sink_denoised: Option<rodio::Sink>,
@@ -38,13 +40,18 @@ pub struct App {
     label: String,
 }
 
-fn play_file(playback_tx: Sender<Event>, path: PathBuf, filename: &String) -> io::Result<()> {
+fn play_file(
+    playback_tx: Sender<Event>,
+    path: PathBuf,
+    filename: &String,
+    threshold: f64,
+) -> io::Result<()> {
     let (_stream, stream_handle) =
         rodio::OutputStream::try_default().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    let sink1 =
-        rodio::Sink::try_new(&stream_handle).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    let sink2 =
-        rodio::Sink::try_new(&stream_handle).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let sink1 = rodio::Sink::try_new(&stream_handle)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let sink2 = rodio::Sink::try_new(&stream_handle)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     let full_path = path.join(filename);
     let file_path = full_path
@@ -63,7 +70,7 @@ fn play_file(playback_tx: Sender<Event>, path: PathBuf, filename: &String) -> io
 
     let mut denoised_wav = wav.clone();
     denoised_wav
-        .denoise_data_fft(0.01)
+        .denoise_data_fft(threshold)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Denoise failed: {:?}", e)))?;
     denoised_wav
         .save_to_file(&save_path)
@@ -82,14 +89,18 @@ fn play_file(playback_tx: Sender<Event>, path: PathBuf, filename: &String) -> io
     sink2.set_volume(0.0);
 
     playback_tx
-        .send(Event::SinksReady(sink1, sink2, Instant::now(), total_duration))
+        .send(Event::SinksReady(
+            sink1,
+            sink2,
+            Instant::now(),
+            total_duration,
+        ))
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     thread::sleep(Duration::from_secs(total_duration.as_secs()));
 
     Ok(())
 }
-
 
 fn format_time(current: u64, total: u64) -> String {
     let format = |t: u64| {
@@ -129,7 +140,6 @@ fn load_progress_bar(
     Ok(())
 }
 
-
 pub(crate) fn handle_input_events(tx: mpsc::Sender<Event>) {
     loop {
         match crossterm::event::read() {
@@ -155,6 +165,7 @@ impl App {
             exit: false,
             progress_bar_color: Color::Green,
             sound_progress: 0.0,
+            threshold: 0.01,
             tx,
             sink_original: None,
             sink_denoised: None,
@@ -199,27 +210,39 @@ impl App {
     }
 
     fn ensure_directories_exists(&mut self) -> io::Result<()> {
-        let current_dir = env::current_dir()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to get current directory: {}", e)))?;
+        let current_dir = env::current_dir().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to get current directory: {}", e),
+            )
+        })?;
 
         let data_dir = current_dir.join("data");
         let denoised_dir = data_dir.join("denoised");
 
-        fs::create_dir_all(&denoised_dir)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to create 'data/denoised' directory: {}", e)))?;
+        fs::create_dir_all(&denoised_dir).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to create 'data/denoised' directory: {}", e),
+            )
+        })?;
 
         self.path = Some(data_dir);
         Ok(())
     }
 
-
     fn list_wav_files(&mut self) -> io::Result<()> {
-        let data_path = self.path.clone().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "Data path not set")
-        })?;
+        let data_path = self
+            .path
+            .clone()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Data path not set"))?;
 
-        let entries = fs::read_dir(&data_path)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to read directory '{}': {}", data_path.display(), e)))?;
+        let entries = fs::read_dir(&data_path).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to read directory '{}': {}", data_path.display(), e),
+            )
+        })?;
 
         let mut files: Vec<String> = vec![];
 
@@ -292,8 +315,10 @@ impl App {
                         let playback_tx = self.tx.clone(); // need to play file in a thread
                         let file_path = self.path.clone().unwrap();
                         let filename = self.selected_file().unwrap().clone();
+                        let threshold = self.threshold.clone();
                         thread::spawn(move || {
-                            if let Err(e) = play_file(playback_tx, file_path, &filename) {
+                            if let Err(e) = play_file(playback_tx, file_path, &filename, threshold)
+                            {
                                 eprintln!("Playback thread error: {:?}", e);
                             }
                         });
@@ -313,11 +338,13 @@ impl App {
                         }
                     }
                 }
-                crossterm::event::KeyCode::Down => {
-                    self.next()
+                crossterm::event::KeyCode::Down => self.next(),
+                crossterm::event::KeyCode::Up => self.previous(),
+                crossterm::event::KeyCode::Left => {
+                    self.threshold = (self.threshold - 0.01).max(0.0);
                 }
-                crossterm::event::KeyCode::Up => {
-                    self.previous()
+                crossterm::event::KeyCode::Right => {
+                    self.threshold = (self.threshold + 0.01).min(0.5);
                 }
                 _ => {}
             }
@@ -328,16 +355,12 @@ impl App {
 
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // let vertical_layout = Layout::vertical([
-        //     Constraint::Percentage(60),
-        //     Constraint::Percentage(20),
-        //     Constraint::Percentage(20),
-        // ]);
         let horizontal_layout =
             Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]);
-        // let [top_area, raw_wave_area, denoised_wave_area] = vertical_layout.areas(area);
-        let [file_selection_area, progress_bar_area] = horizontal_layout.areas(area);
-
+        let [file_selection_area, right_side_area] = horizontal_layout.areas(area);
+        let vertical_layout =
+            Layout::vertical([Constraint::Percentage(70), Constraint::Percentage(30)]);
+        let [progress_bar_area, threshold_area] = vertical_layout.areas(right_side_area);
         let controls = Line::from(vec![
             " Change File ".into(),
             "<Up/Down>".red().bold(),
@@ -357,16 +380,14 @@ impl Widget for &App {
 
         let items: Vec<ListItem> = self
             .files
-            .as_ref()  // convert Option<&Vec<String>>
-            .map(|files| {
-                files.iter()
-                    .map(|f| ListItem::new(f.as_str()))
-                    .collect()
-            })
+            .as_ref() // convert Option<&Vec<String>>
+            .map(|files| files.iter().map(|f| ListItem::new(f.as_str())).collect())
             .unwrap_or_else(|| vec![ListItem::new("<No files found>")]);
 
-        let file_selector = List::new(items).block(controls_block)
-            .highlight_style(Style::default().fg(Color::Yellow)).bg(Color::Indexed(017))
+        let file_selector = List::new(items)
+            .block(controls_block)
+            .highlight_style(Style::default().fg(Color::Yellow))
+            .bg(Color::Indexed(017))
             .highlight_symbol(">> ");
 
         let mut state = ListState::default();
@@ -384,22 +405,29 @@ impl Widget for &App {
             .borders(Borders::ALL)
             .border_set(border::THICK);
 
-
         let progress_bar = Gauge::default()
             .gauge_style(Style::default().fg(self.progress_bar_color))
             .block(sound_controls_block)
             .label(&self.label)
             .ratio(self.sound_progress);
 
+        let threshold_instructions = Line::from(vec![
+            " +0.01 / -0.01 ".into(),
+            " <Left>/<Right> ".blue().bold(),
+        ])
+        .centered();
 
-        // let block = Block::bordered()
-        //     .title(" Raw Sound Wave ")
-        //     .borders(Borders::ALL);
+        let threshold_control_block = Block::bordered()
+            .title(" Threshold ")
+            .title_bottom(threshold_instructions)
+            .borders(Borders::ALL)
+            .border_set(border::THICK);
 
-        // let sound_wave = Gauge::default().block(block); // temporary sound_wave object
-        // let sound_wave = Canvas::default().block(block);
-        // sound_wave.render(raw_wave_area, buf);
-
+        let threshold_bar = Gauge::default()
+            .gauge_style(Style::default().fg(Color::LightBlue))
+            .block(threshold_control_block)
+            .label(Span::raw(format!("Threshold: {:.2}", self.threshold)))
+            .ratio(self.threshold * 2.0);
 
         StatefulWidget::render(&file_selector, file_selection_area, buf, &mut state);
 
@@ -413,5 +441,6 @@ impl Widget for &App {
             buf,
         );
 
+        threshold_bar.render(threshold_area, buf)
     }
 }
