@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
-use std::{env, io, thread};
+use std::{env, fs, io, thread};
 
 pub(crate) enum Event {
     Input(crossterm::event::KeyEvent),
@@ -170,6 +170,7 @@ impl App {
         terminal: &mut DefaultTerminal,
         rx: mpsc::Receiver<Event>,
     ) -> io::Result<()> {
+        self.ensure_directories_exists()?;
         self.list_wav_files()?;
 
         while !self.exit {
@@ -197,27 +198,51 @@ impl App {
         Ok(())
     }
 
+    fn ensure_directories_exists(&mut self) -> io::Result<()> {
+        let current_dir = env::current_dir()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to get current directory: {}", e)))?;
+
+        let data_dir = current_dir.join("data");
+        let denoised_dir = data_dir.join("denoised");
+
+        fs::create_dir_all(&denoised_dir)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to create 'data/denoised' directory: {}", e)))?;
+
+        self.path = Some(data_dir);
+        Ok(())
+    }
+
 
     fn list_wav_files(&mut self) -> io::Result<()> {
-        let dir = env::current_dir()?.join("data");
-        self.path = Some(dir.clone());
+        let data_path = self.path.clone().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "Data path not set")
+        })?;
 
-        self.files = Some(
-            std::fs::read_dir(dir)?
-                .filter_map(|entry| {
-                    let path = entry.ok()?.path();
-                    if path.extension()?.to_str()? == "wav" {
-                        self.ready_to_play = true;
-                        Some(path.file_name()?.to_string_lossy().to_string())
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        );
-        if !self.ready_to_play {
-            self.files = Some(vec!["<<Couldn't load files>>".to_string()]);
+        let entries = fs::read_dir(&data_path)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to read directory '{}': {}", data_path.display(), e)))?;
+
+        let mut files: Vec<String> = vec![];
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("wav") {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    files.push(name.to_string());
+                    self.ready_to_play = true;
+                }
+            }
         }
+
+        if files.is_empty() {
+            files.push("<<Couldn't load any \".wav\" files; \nensure they are located in the\n\n\\data\\\n\ndirectory>>".to_string());
+        }
+
+        self.files = Some(files);
         Ok(())
     }
 
